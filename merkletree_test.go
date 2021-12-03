@@ -1,7 +1,6 @@
 package merkletree
 
 import (
-	"bytes"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -160,22 +159,22 @@ func TestAuditProof(t *testing.T) {
 		}
 
 		tree := NewTree(IdentityHashForTest, blocks)
-		target := tree.checksumFunc(true, []byte("alpha"))
+		LeafHash := tree.HashFunc(true, []byte("alpha"))
 
-		proof, err := tree.CreateProof(target)
+		proof, err := tree.CreateProof(LeafHash)
 		if err != nil {
 			t.Fail()
 		}
 
 		expected := Proof{
-			parts: []*ProofPart{{
-				isRight:  true,
-				checksum: tree.checksumFunc(true, []byte("beta")),
+			PathToRoot: []*ProofPart{{
+				IsRight: true,
+				Hash:    tree.HashFunc(true, []byte("beta")),
 			}, {
-				isRight:  true,
-				checksum: tree.checksumFunc(false, append(tree.checksumFunc(true, []byte("kappa")), tree.checksumFunc(true, []byte("kappa"))...)),
+				IsRight: true,
+				Hash:    tree.HashFunc(false, append(tree.HashFunc(true, []byte("kappa")), tree.HashFunc(true, []byte("kappa"))...)),
 			}},
-			target: target,
+			LeafHash: LeafHash,
 		}
 
 		if !expected.Equals(proof) {
@@ -196,8 +195,8 @@ func TestAuditProof(t *testing.T) {
 		}
 
 		tree := NewTree(IdentityHashForTest, blocks)
-		target := tree.checksumFunc(true, []byte("omega"))
-		proof, _ := tree.CreateProof(target)
+		LeafHash := tree.HashFunc(true, []byte("omega"))
+		proof, _ := tree.CreateProof(LeafHash)
 
 		expectStrEqual(t, proof.ToString(bytesToStrForTest), proofA)
 	})
@@ -212,19 +211,19 @@ func TestAuditProof(t *testing.T) {
 			tree := NewTree(IdentityHashForTest, blocks)
 
 			proof := &Proof{
-				parts: []*ProofPart{{
-					isRight:  true,
-					checksum: tree.checksumFunc(true, []byte("beta")),
+				PathToRoot: []*ProofPart{{
+					IsRight: true,
+					Hash:    tree.HashFunc(true, []byte("beta")),
 				}},
-				target: tree.checksumFunc(true, []byte("alpha")),
+				LeafHash: tree.HashFunc(true, []byte("alpha")),
 			}
 
-			if !tree.VerifyProof(proof) {
+			if !VerifyProofCustomHash(proof.LeafHash, proof.PathToRoot, tree.Root.GetHash(), IdentityHashForTest) {
 				t.Fail()
 			}
 		})
 
-		t.Run("invalid proof (isRight should be true) for a two-leaf tree", func(t *testing.T) {
+		t.Run("invalid proof (IsRight should be true) for a two-leaf tree", func(t *testing.T) {
 			blocks := [][]byte{
 				[]byte("alpha"),
 				[]byte("beta"),
@@ -233,14 +232,14 @@ func TestAuditProof(t *testing.T) {
 			tree := NewTree(IdentityHashForTest, blocks)
 
 			proof := &Proof{
-				parts: []*ProofPart{{
-					isRight:  false,
-					checksum: tree.checksumFunc(true, []byte("beta")),
+				PathToRoot: []*ProofPart{{
+					IsRight: false,
+					Hash:    tree.HashFunc(true, []byte("beta")),
 				}},
-				target: tree.checksumFunc(true, []byte("alpha")),
+				LeafHash: tree.HashFunc(true, []byte("alpha")),
 			}
 
-			if tree.VerifyProof(proof) {
+			if VerifyProofCustomHash(proof.LeafHash, proof.PathToRoot, tree.Root.GetHash(), IdentityHashForTest) {
 				t.Fail()
 			}
 		})
@@ -254,19 +253,19 @@ func TestAuditProof(t *testing.T) {
 			tree := NewTree(IdentityHashForTest, blocks)
 
 			proof := &Proof{
-				parts: []*ProofPart{{
-					isRight:  true,
-					checksum: tree.checksumFunc(true, []byte("kappa")),
+				PathToRoot: []*ProofPart{{
+					IsRight: true,
+					Hash:    tree.HashFunc(true, []byte("kappa")),
 				}},
-				target: tree.checksumFunc(true, []byte("alpha")),
+				LeafHash: tree.HashFunc(true, []byte("alpha")),
 			}
 
-			if tree.VerifyProof(proof) {
+			if VerifyProofCustomHash(proof.LeafHash, proof.PathToRoot, tree.Root.GetHash(), IdentityHashForTest) {
 				t.Fail()
 			}
 		})
 
-		t.Run("invalid proof (tree doesn't contain target) for a two-leaf tree", func(t *testing.T) {
+		t.Run("invalid proof (tree doesn't contain LeafHash) for a two-leaf tree", func(t *testing.T) {
 			blocks := [][]byte{
 				[]byte("alpha"),
 				[]byte("beta"),
@@ -275,14 +274,14 @@ func TestAuditProof(t *testing.T) {
 			tree := NewTree(IdentityHashForTest, blocks)
 
 			proof := &Proof{
-				parts: []*ProofPart{{
-					isRight:  true,
-					checksum: tree.checksumFunc(true, []byte("beta")),
+				PathToRoot: []*ProofPart{{
+					IsRight: true,
+					Hash:    tree.HashFunc(true, []byte("beta")),
 				}},
-				target: tree.checksumFunc(true, []byte("kappa")),
+				LeafHash: tree.HashFunc(true, []byte("kappa")),
 			}
 
-			if tree.VerifyProof(proof) {
+			if VerifyProofCustomHash(proof.LeafHash, proof.PathToRoot, tree.Root.GetHash(), IdentityHashForTest) {
 				t.Fail()
 			}
 		})
@@ -300,20 +299,25 @@ func TestAuditProof(t *testing.T) {
 			}
 
 			tree := NewTree(IdentityHashForTest, blocks)
-			target := tree.checksumFunc(true, []byte("alpha"))
+			LeafHash := tree.HashFunc(true, []byte("alpha"))
 
-			proof, err := tree.CreateProof(target)
+			proof, err := tree.CreateProof(LeafHash)
 			if err != nil {
 				t.Fail()
 			}
 
-			if !tree.VerifyProof(proof) {
+			if !VerifyProofCustomHash(proof.LeafHash, proof.PathToRoot, tree.Root.GetHash(), IdentityHashForTest) {
 				t.Fail()
 			}
 		})
 	})
 }
 
+// Note: Bitcoin doesn't care about pre-image attacks and the mechanism in the library
+// that protects against them causes the library to be incompatible with Bitcoin. As such
+// we comment out the code that protects against pre-image attacks and comment out
+// this test.
+/*
 func TestHandlesPreimageAttack(t *testing.T) {
 	blocks := [][]byte{
 		[]byte("alpha"),
@@ -323,15 +327,16 @@ func TestHandlesPreimageAttack(t *testing.T) {
 
 	tree := NewTree(Sha256DoubleHash, blocks)
 
-	l := append(tree.checksumFunc(true, []byte("alpha")), tree.checksumFunc(true, []byte("beta"))...)
-	r := append(tree.checksumFunc(true, []byte("kappa")), tree.checksumFunc(true, []byte("kappa"))...)
+	l := append(tree.HashFunc(true, []byte("alpha")), tree.HashFunc(true, []byte("beta"))...)
+	r := append(tree.HashFunc(true, []byte("kappa")), tree.HashFunc(true, []byte("kappa"))...)
 
 	tree2 := NewTree(Sha256DoubleHash, [][]byte{l, r})
 
-	if bytes.Equal(tree.root.GetChecksum(), tree2.root.GetChecksum()) {
+	if bytes.Equal(tree.Root.GetHash(), tree2.Root.GetHash()) {
 		t.Fail()
 	}
 }
+*/
 
 func TestDocsCreateAndPrintAuditProof(t *testing.T) {
 	blocks := [][]byte{
@@ -341,8 +346,8 @@ func TestDocsCreateAndPrintAuditProof(t *testing.T) {
 	}
 
 	tree := NewTree(Sha256DoubleHash, blocks)
-	target := tree.checksumFunc(true, []byte("alpha"))
-	proof, _ := tree.CreateProof(target)
+	LeafHash := tree.HashFunc(true, []byte("alpha"))
+	proof, _ := tree.CreateProof(LeafHash)
 
 	fmt.Println(proof.ToString(func(bytes []byte) string {
 		return hex.EncodeToString(bytes)[0:16]
@@ -372,10 +377,12 @@ func TestDocsValidateProof(t *testing.T) {
 
 	tree := NewTree(Sha256DoubleHash, blocks)
 
-	proof, err := tree.CreateProof(tree.rows[0][0].GetChecksum())
+	proof, err := tree.CreateProof(tree.Rows[0][0].GetHash())
 	if err != nil {
 		panic(err)
 	}
 
-	tree.VerifyProof(proof) // true
+	if !VerifyProof(proof.LeafHash, proof.PathToRoot, tree.Root.GetHash()) {
+		t.Fail()
+	}
 }

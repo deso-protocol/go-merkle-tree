@@ -3,6 +3,7 @@ package merkletree
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math"
 )
 
@@ -11,68 +12,184 @@ import (
 ////////
 
 type Tree struct {
-	root         Node
-	rows         [][]Node
-	checksumFunc func(isLeaf bool, block []byte) []byte
+	Root     Node
+	Rows     [][]Node
+	HashFunc func(isLeaf bool, block []byte) []byte
 }
 
 type Node interface {
-	GetChecksum() []byte
-	ToString(checksumToStrFunc, int) string
+	GetHash() []byte
+	ToString(HashToStrFunc, int) string
 }
 
 type Branch struct {
-	checksum []byte
-	left     Node
-	right    Node
+	Hash  []byte
+	Left  Node
+	Right Node
 }
 
 type Leaf struct {
-	checksum []byte
-	block    []byte
+	Hash []byte
+	Data []byte
 }
 
 type ProofPart struct {
-	isRight  bool
-	checksum []byte
+	IsRight bool
+	Hash    []byte
+}
+
+const (
+	ProofPartSerializeSize = 1 + 32
+)
+
+func (pf *ProofPart) Serialize() ([]byte, error) {
+	data := []byte{}
+
+	if pf.IsRight {
+		data = append(data, 1)
+	} else {
+		data = append(data, 0)
+	}
+
+	if len(pf.Hash) != 32 {
+		return nil, fmt.Errorf(
+			"ProofPart.Serailize: Hash size %d should equal %d", pf.Hash, 32)
+	}
+	data = append(data, pf.Hash...)
+
+	return data, nil
+}
+
+func (pf *ProofPart) Deserialize(data []byte) error {
+	if len(data) != ProofPartSerializeSize {
+		return fmt.Errorf(
+			"ProofPart.Deserialize: data length %d should equal %d",
+			len(data), ProofPartSerializeSize)
+	}
+
+	if data[0] == 0 {
+		pf.IsRight = false
+	} else {
+		pf.IsRight = true
+	}
+
+	pf.Hash = data[1:]
+
+	return nil
 }
 
 type Proof struct {
-	checksumFunc func(isLeaf bool, xs []byte) []byte
-	parts        []*ProofPart
-	target       []byte // checksum of some block
+	HashFunc func(isLeaf bool, xs []byte) []byte
+	// PathToRoot is a path from the LeafHash up to the root of the Merkle
+	// tree. Note that the LeafHash and the Root hash are not included in
+	// the this list. Rather, the list is everything in between these two
+	// items. To put it visually, below is how to think about a Merkle proof
+	// as it is described by this library:
+	//
+	//             RootHash
+	//            /        \
+	//        ... PathToRoot ...
+	//          /            \
+	//         ... LeafHash ...
+	//
+	PathToRoot []*ProofPart
+	// LeafHash is the hash of an element at the lowest level of
+	// the Merkle tree. It is the hash of the element we want to
+	// prove actually exists in the tree.
+	LeafHash []byte
 }
 
-type checksumToStrFunc func([]byte) string
+type HashToStrFunc func([]byte) string
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // CONSTRUCTORS
 ///////////////
 
+func NewLeafFromHash(hash []byte) *Leaf {
+	return &Leaf{
+		Hash: hash,
+		Data: nil,
+	}
+}
+
 func NewLeaf(sumFunc func(bool, []byte) []byte, block []byte) *Leaf {
 	return &Leaf{
-		checksum: sumFunc(true, block),
-		block:    block,
+		Hash: sumFunc(true, block),
+		Data: block,
 	}
 }
 
 func NewBranch(sumFunc func(bool, []byte) []byte, left Node, right Node) *Branch {
 	return &Branch{
-		checksum: sumFunc(false, append(left.GetChecksum(), right.GetChecksum()...)),
-		left:     left,
-		right:    right,
+		Hash:  sumFunc(false, append(left.GetHash(), right.GetHash()...)),
+		Left:  left,
+		Right: right,
+	}
+}
+
+func NewTreeFromHashes(providedSumFunc func([]byte) []byte, hashes [][]byte) *Tree {
+	levels := int(math.Ceil(math.Log2(float64(len(hashes)+len(hashes)%2))) + 1)
+
+	sumFunc := func(isLeaf bool, xs []byte) []byte {
+		return providedSumFunc(xs)
+	}
+
+	// represents each row in the tree, where rows[0] is the base and rows[len(rows)-1] is the root
+	rows := make([][]Node, levels)
+
+	// build our base of leaves
+	for i := 0; i < len(hashes); i++ {
+		rows[0] = append(rows[0], NewLeafFromHash(hashes[i]))
+	}
+
+	// build upwards until we hit the root
+	for i := 1; i < levels; i++ {
+		prev := rows[i-1]
+
+		// each iteration creates a branch from a pair of values originating from the previous level
+		for j := 0; j < len(prev); j = j + 2 {
+			var l, r Node
+
+			// if we don't have enough to make a pair, duplicate the left
+			if j+1 >= len(prev) {
+				l = prev[j]
+				r = l
+			} else {
+				l = prev[j]
+				r = prev[j+1]
+			}
+
+			b := NewBranch(sumFunc, l, r)
+
+			rows[i] = append(rows[i], b)
+		}
+	}
+
+	return &Tree{
+		HashFunc: sumFunc,
+		Rows:     rows,
+		Root:     rows[len(rows)-1][0],
 	}
 }
 
 func NewTree(providedSumFunc func([]byte) []byte, blocks [][]byte) *Tree {
 	levels := int(math.Ceil(math.Log2(float64(len(blocks)+len(blocks)%2))) + 1)
 
-	sumFunc := func(isLeaf bool, xs []byte) []byte {
-		if isLeaf {
-			return providedSumFunc(append([]byte{0x00}, xs...))
-		}
+	// Note: The below code has been commented out and replaced because it causes
+	// the library to be incompatible with Bitcoin. This code is intended to make
+	// the library more resistant to pre-image attacks, but this is a very minor
+	// concern that Bitcoin doesn't worry about.
+	/*
+		sumFunc := func(isLeaf bool, xs []byte) []byte {
+			if isLeaf {
+				return providedSumFunc(append([]byte{0x00}, xs...))
+			}
 
-		return providedSumFunc(append([]byte{0x01}, xs...))
+			return providedSumFunc(append([]byte{0x01}, xs...))
+		}
+	*/
+	sumFunc := func(isLeaf bool, xs []byte) []byte {
+		return providedSumFunc(xs)
 	}
 
 	// represents each row in the tree, where rows[0] is the base and rows[len(rows)-1] is the root
@@ -107,9 +224,9 @@ func NewTree(providedSumFunc func([]byte) []byte, blocks [][]byte) *Tree {
 	}
 
 	return &Tree{
-		checksumFunc: sumFunc,
-		rows:         rows,
-		root:         rows[len(rows)-1][0],
+		HashFunc: sumFunc,
+		Rows:     rows,
+		Root:     rows[len(rows)-1][0],
 	}
 }
 
@@ -117,39 +234,35 @@ func NewTree(providedSumFunc func([]byte) []byte, blocks [][]byte) *Tree {
 // METHODS
 //////////
 
-func (b *Branch) GetChecksum() []byte {
-	return b.checksum
+func (b *Branch) GetHash() []byte {
+	return b.Hash
 }
 
-func (l *Leaf) GetChecksum() []byte {
-	return l.checksum
+func (l *Leaf) GetHash() []byte {
+	return l.Hash
 }
 
-func (t *Tree) VerifyProof(p *Proof) bool {
-	index := t.getLeafIdxByChecksum(p.target)
+func VerifyProof(leafHash []byte, pathToTarget []*ProofPart, target []byte) bool {
+	return VerifyProofCustomHash(leafHash, pathToTarget, target, Sha256DoubleHash)
+}
 
-	if index == -1 {
-		return false
-	}
-
-	z := p.target
-	for i := 0; i < len(t.rows)-1; i++ {
-		if p.parts[i].isRight {
-			z = t.checksumFunc(false, append(z, p.parts[i].checksum...))
+func VerifyProofCustomHash(leafHash []byte, pathToTarget []*ProofPart, target []byte, hashFunc func([]byte) []byte) bool {
+	z := leafHash
+	for i := 0; i < len(pathToTarget); i++ {
+		if pathToTarget[i].IsRight {
+			z = hashFunc(append(z, pathToTarget[i].Hash...))
 		} else {
-			z = t.checksumFunc(false, append(p.parts[i].checksum, z...))
+			z = hashFunc(append(pathToTarget[i].Hash, z...))
 		}
-
-		index = int(float64(index / 2))
 	}
 
-	return bytes.Equal(t.root.GetChecksum(), z)
+	return bytes.Equal(target, z)
 }
 
-func (t *Tree) getLeafIdxByChecksum(checksum []byte) int {
+func (t *Tree) getLeafIdxByChecksum(Hash []byte) int {
 	index := -1
-	for i := 0; i < len(t.rows[0]); i++ {
-		if bytes.Equal(checksum, t.rows[0][i].GetChecksum()) {
+	for i := 0; i < len(t.Rows[0]); i++ {
+		if bytes.Equal(Hash, t.Rows[0][i].GetHash()) {
 			return i
 		}
 	}
@@ -163,28 +276,28 @@ func (t *Tree) CreateProof(leafChecksum []byte) (*Proof, error) {
 	index := t.getLeafIdxByChecksum(leafChecksum)
 
 	if index == -1 {
-		return nil, errors.New("target not found in receiver")
+		return nil, errors.New("LeafHash not found in receiver")
 	}
 
-	for i := 0; i < len(t.rows)-1; i++ {
+	for i := 0; i < len(t.Rows)-1; i++ {
 		if index%2 == 1 {
 			// is right, so go back one to get left
 			parts = append(parts, &ProofPart{
-				isRight:  false,
-				checksum: t.rows[i][index-1].GetChecksum(),
+				IsRight: false,
+				Hash:    t.Rows[i][index-1].GetHash(),
 			})
 		} else {
-			var checksum []byte
-			if (index + 1) < len(t.rows[i]) {
-				checksum = t.rows[i][index+1].GetChecksum()
+			var Hash []byte
+			if (index + 1) < len(t.Rows[i]) {
+				Hash = t.Rows[i][index+1].GetHash()
 			} else {
-				checksum = t.rows[i][index].GetChecksum()
+				Hash = t.Rows[i][index].GetHash()
 			}
 
 			// is left, so go one forward to get hash pair
 			parts = append(parts, &ProofPart{
-				isRight:  true,
-				checksum: checksum,
+				IsRight: true,
+				Hash:    Hash,
 			})
 		}
 
@@ -192,25 +305,25 @@ func (t *Tree) CreateProof(leafChecksum []byte) (*Proof, error) {
 	}
 
 	return &Proof{
-		checksumFunc: t.checksumFunc,
-		parts:        parts,
-		target:       leafChecksum,
+		HashFunc:   t.HashFunc,
+		PathToRoot: parts,
+		LeafHash:   leafChecksum,
 	}, nil
 }
 
 func (p *Proof) Equals(o *Proof) bool {
-	if !bytes.Equal(p.target, o.target) {
+	if !bytes.Equal(p.LeafHash, o.LeafHash) {
 		return false
 	}
 
-	if len(p.parts) != len(o.parts) {
+	if len(p.PathToRoot) != len(o.PathToRoot) {
 		return false
 	}
 
 	ok := true
 
-	for i := 0; i < len(p.parts); i++ {
-		ok = ok && p.parts[i].isRight && o.parts[i].isRight && bytes.Equal(p.parts[i].checksum, o.parts[i].checksum)
+	for i := 0; i < len(p.PathToRoot); i++ {
+		ok = ok && p.PathToRoot[i].IsRight && o.PathToRoot[i].IsRight && bytes.Equal(p.PathToRoot[i].Hash, o.PathToRoot[i].Hash)
 	}
 
 	return ok
